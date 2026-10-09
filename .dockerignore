@@ -1,0 +1,12 @@
+# Only what server/Dockerfile copies.
+*
+!server/Makefile
+!server/src
+!server/third_party
+!client/third_party/cjson
+!client/build/web
+!runs/ft2b/wof.bin
+!data/train.csv
+!data/dev.csv
+!data/demo.json
+!data/wordlist/american-english.txt

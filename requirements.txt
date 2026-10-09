@@ -1,0 +1,6 @@
+# Python 3.12. Phases 1 to 4, 6 to 8, 11 (smart-solve) and 13 need only the standard
+# library and numpy. Phase 5 needs pyarrow. Phases 9 to 12 need torch.
+# CPU torch: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+numpy==1.26.4
+pyarrow==25.0.1
+torch==2.14.0

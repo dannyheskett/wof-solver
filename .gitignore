@@ -1,0 +1,12 @@
+# Built by the pipeline, not committed. See DATA.md and data/SHA256SUMS.
+/data/main_*.tsv
+/data/bonus_*.tsv
+/data/corpus/raw/
+/data/corpus/*.txt
+/data/sources/raw/
+/data/train/
+/data/.cache/
+/runs/
+/.venv/
+/server/build/
+__pycache__/
