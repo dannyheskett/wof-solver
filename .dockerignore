@@ -6,6 +6,7 @@
 !client/third_party/cjson
 !client/build/web
 !runs/ft2b/wof.bin
+!runs/vision/dec2/decoder.bin
 !data/train.csv
 !data/dev.csv
 !data/demo.json

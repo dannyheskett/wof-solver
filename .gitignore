@@ -10,3 +10,8 @@
 /.venv/
 /server/build/
 __pycache__/
+/data/vision/raw/
+/data/vision/synth/
+/data/vision/fonts/
+/data/vision/raw_lb/
+/data/vision/real/

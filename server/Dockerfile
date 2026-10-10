@@ -16,6 +16,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 COPY --from=build /src/server/build/wof-server /usr/local/bin/wof-server
 COPY runs/ft2b/wof.bin models/wof.bin
+COPY runs/vision/dec2/decoder.bin models/decoder.bin
 COPY data/train.csv data/dev.csv data/demo.json data/
 COPY data/wordlist/american-english.txt data/wordlist/
 COPY client/build/web/ web/

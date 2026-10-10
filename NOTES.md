@@ -40,6 +40,7 @@ Each phase has its own script in `scripts/`. `DATA.md` documents every file they
 | 11 | `11_evaluate.py` | Plays both solvers on all 3,349 control puzzles |
 | 12 | `12_export_weights.py` | Exports the transformer as float16 weights for the C server |
 | 13 | `13_build_demo.py` | Builds the demo's puzzle and category data |
+| 14 | `14_vision/` | The board decoder: reads a screencap or photo of the TV board for `POST /decode` |
 
 Shared code: `wof_common.py` (board rules, word list, smart picks), `solvers.py` (both solvers and the move check), `model.py` (the transformer).
 
@@ -99,6 +100,32 @@ Loss is on the target only.
 - **Timing caveat:** the CPU times are from runs that shared the machine with other jobs.
 - **Human comparison:** contestants solve roughly 40% of bonus rounds (unconfirmed). That isn't comparable as is, since they get 10 seconds and no word list.
 
+## The board decoder (phase 14)
+
+`POST /decode` takes a screencap or a phone photo of the puzzle board and returns what `/move` takes: the category, the board and the letters showing. The solvers are unchanged.
+
+**The model** (`14_vision/decoder_net.py`): a 1.96M-parameter CNN (ReLU convs, batch norm, features at 1/8, 1/16 and 1/32 scale merged to 45 x 80 tokens) and a 3-layer transformer decoder with 77 learned queries: 52 squares, 24 category characters, and whether a board is there at all. Input is the image letterboxed to 640 x 360. Each square is one of 37 classes: `#` unused, `_` hidden, `*` lit, a letter or punctuation shown, `~` covered.
+
+**Synthetic frames** (`render.py`, `make_frames.py`): puzzles from `train.csv` laid out the show's way (every line starts in the same column; `board.layout_score` picks among placements), drawn as the 2022-on LED board or the 1997-2022 board, with a host figure, lit squares, the category strip, the floor reflection, insets, captions and station logos, then passed through one of three sources: a clean capture, an off-air recording (low resolution, 4:3 crops, compression), or a phone filming the TV (bezel, angle, moire, glare). 10% of frames have no board (the wheel, people, title cards). Val and test frames use `dev.csv` and `control.csv`.
+
+**Real frames** (`clips.tsv`, `fetch_clips.sh`): 480 YouTube clips at one frame a second, 93,605 frames: 134 broadcast clips from the show's channel (Season 40 on), 262 off-air recordings and 84 phone recordings of a TV. The frames stay local; only the clip list is committed. `label_real.py` labels them with the decoder's own reads corrected by each puzzle's answer: frames are cut into puzzles, and the answer is looked up in `puzzles.csv` by its layout and the letters read, or, for puzzles newer than `puzzles.csv` (most of Season 40 on), spelled word by word from the word list and the decoder's letter probabilities. `clean_labels.py` drops doubtful spelled answers (a hand check found about a quarter wrong before the filter). Test frames are the 5% of answers 02 holds out as control, and only answers looked up in `puzzles.csv`, so they are known to be right.
+
+**Training** (`train.py`, `pod/`): `dec1` trained 30,000 steps at batch 128 on 100,000 synthetic frames; `dec2` finetuned it 8,000 steps on 120,000 synthetic frames with 30% of each batch real (24,677 labelled frames). Both on a rented A40.
+
+**Results.** On 2,000 synthetic test-style frames dec2 gets 99.4% of squares and 87.0% of whole boards right (broadcast 92.1%, off-air 91.6%, phone 75.9%). On 752 real held-out frames, the board text the solvers would get is exactly right for:
+
+| Model | All | Broadcast | Off-air | Phone (20 frames) | Squares |
+|---|---|---|---|---|---|
+| dec1, synthetic only | 58.4% | 49.3% | 62.6% | 55% | 97.2% |
+| dec2, with real frames | 74.5% | 75.8% | 74.3% | 65% | 98.3% |
+
+- **Most remaining errors are reveal timing**: a square read as its letter while the label still has it hidden, on frames caught mid-reveal at one frame a second. Some of these are the labels, which come from the decoder's own reads.
+- **The real labels are partly the model's own reads** (which squares are lit or covered, when a letter first shows), so the real scores lean favourable. The answers themselves are checked against `puzzles.csv`.
+- **Phone photos are barely tested**: 20 real frames. Real phone photos of a TV are the next test set.
+- **Board or not**: dec2 still calls some title cards a board. The server also requires at most 12 squares under 80% confidence (real boards: 99% have 7 or fewer), which rejects them.
+
+**The server** (`server/src/decoder.c`): the same forward pass in C, float32, weights exported by `export_decoder.py` (`runs/vision/dec2/decoder.bin`, 9.7 MB). Images are decoded by `stb_image.h` (JPEG and PNG) and letterboxed exactly as Pillow's BILINEAR resize does. `server/tests/decoder_parity.py` checks it against PyTorch: identical letterboxed bytes, square probabilities within 6e-6, the same class for every square and the same category text. A read takes 0.4-1.5 s on this laptop under load.
+
 ## Hosting
 
 Both solvers are served together at https://wof-solver.fly.dev by one C program, `server/` (`wof-server`). It also serves the WASM client (`client/`). It runs on Fly.io in the personal org: app `wof-solver`, region iad, shared-cpu-1x, 256 MB.
@@ -109,7 +136,7 @@ Both solvers are served together at https://wof-solver.fly.dev by one C program,
         "transformer": {"move": ..., "confidence": ..., "letters": [...],
                         "turned_down": ..., "ms": ...}}
 
-The caller holds the answer. The service sees only the category, board and called letters, as in `11_evaluate.py`. The full API is at the top of `server/src/main.c`.
+The caller holds the answer. The service sees only the category, board and called letters, as in `11_evaluate.py`. `POST /decode` (phase 14) reads those three from an image instead. The full API is at the top of `server/src/main.c`.
 
 - **`server/src/model.c`:** runs the transformer on one thread, with the same layers as `scripts/model.py` and exact (erf) GELU. Weights are float16 (`12_export_weights.py`, 118 MB), mapped from the file rather than copied into memory. All arithmetic is float32.
 - **`server/src/transformer.c`:** decodes each move greedily under the same rules as the masks above, and turns down a MAIN SOLVE under 0.99. A SOLVE's confidence is renormalised over the characters each square allows.
@@ -148,4 +175,11 @@ Machine for everything below unless noted: WSL2 on an Intel Core i5-1335U, 12 lo
 | 2026-10-07 | Fly.io deploys (remote builder) | several minutes each | Fly builder | |
 | 2026-10-08 | Fly.io machine, shared-cpu-1x 256 MB, iad | $2.19/mo always on; suspended: $0.15/GB/mo of rootfs | 1 shared CPU | |
 
-Total GPU spend: about $5.15.
+| 2026-10-10 | 14 YouTube clips, 480 of 705 listed (`fetch_clips.sh`) | several hours, network bound | yt-dlp, ffmpeg | 22 GB video and frames (local) |
+| 2026-10-10 | 14 Runpod pod, A40 48GB, Secure Cloud | 6.46 h up, $0.59/hr, ~$3.81 | 1 GPU, 9 vCPU (7.65 usable) | |
+| 2026-10-10 | 14 Render 100,000 synthetic frames | 4,041 s | 6 workers on the pod | ~5 GB |
+| 2026-10-10 | 14 Train dec1, 30,000 steps | ~2.7 h | A40, ~395 frames/s (data loading bound) | 7.9 MB checkpoint |
+| 2026-10-10 | 14 Label 93,605 real frames, twice | ~15 min each | A40 | 9 MB labels |
+| 2026-10-10 | 14 Finetune dec2, 8,000 steps | ~45 min | A40 | 7.9 MB checkpoint |
+
+Total GPU spend: about $8.96.
