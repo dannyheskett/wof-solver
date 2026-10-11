@@ -22,8 +22,9 @@
 //   GET /, /<file>           the client, from WEB_ROOT, loaded at start
 //
 //   POST /decode[?solve=1[&mode=main|bonus_pick|bonus_solve]]
-//   body: a JPEG or PNG screencap or photo of the puzzle board, up to
-//   DECODE_MAX_BYTES, sent as is (Content-Type image/jpeg or image/png)
+//   body: a JPEG, PNG or WebP screencap or photo of the puzzle board, up to
+//   DECODE_MAX_BYTES, sent as is (Content-Type image/jpeg, image/png or
+//   image/webp). HEIC is not read: convert it to JPEG in the browser.
 //   -> {"found": true, "present": 0.99,
 //       "category": "Food And Drink", "category_read": "FOOD & DRINK",
 //       "board": "A _A__L_ __ ___ ______", "called": "AL",
@@ -44,9 +45,13 @@
 //   solve=1 the reply also carries "moves": what /move answers for that board
 //   (mode main unless given; the bonus modes add R S T L N E to called), or
 //   "moves_error" when the board cannot be played, and "guess":
-//   {"answer": ..., "confidence": 0.94}, transformer-solve's best SOLVE for
-//   the board however unsure (its MAIN prompt with only a SOLVE allowed):
-//   the single answer for snap and solve. A board with no hidden squares is
+//   {"answer": ..., "confidence": 0.94, "by": "transformer-solve"}, the
+//   single answer for snap and solve. When smart-solve's move is a SOLVE,
+//   that is the guess, "by": "smart-solve", with confidence 0.97 (its
+//   SOLVEs were right 63 times in 65 on the real test frames). Otherwise it
+//   is transformer-solve's best SOLVE however unsure (its MAIN prompt with
+//   only a SOLVE allowed) and its own confidence, which is well calibrated:
+//   0.9 or more was right 90% of the time. A board with no hidden squares is
 //   its own answer, confidence 1. The board decoder is
 //   scripts/14_vision/decoder_net.py (server/src/decoder.c). /decode has its
 //   own limit, DECODE_RATE a minute per client, and reads one image at a time.
@@ -706,7 +711,7 @@ static int do_decode(int fd, const Request *rq, const char *query, size_t qlen) 
     int want_solve = !strcmp(solve_s, "1") || !strcmp(solve_s, "true");
     int w, h;
     if (image_info((const uint8_t *)rq->body, rq->body_len, &w, &h))
-        return error_reply(fd, rq, 400, "the image must be a JPEG or PNG");
+        return error_reply(fd, rq, 400, "the image must be a JPEG, PNG or WebP");
     if ((double)w * h > MAX_PIXELS) return error_reply(fd, rq, 413, "the image is over 16 megapixels");
     DecodeResult *r = malloc(sizeof *r);
     uint8_t *in = malloc((size_t)DEC_IN_W * DEC_IN_H * 3);
@@ -781,29 +786,41 @@ static int do_decode(int fd, const Request *rq, const char *query, size_t qlen) 
             const char *err = strchr(board, '_') ? check(st, &mode, c2, b2, k2, want)
                                                  : "the board has no hidden squares";
             cJSON_Delete(st);
-            if (!err || strchr(board, '_') == NULL) {
-                cJSON *gs = cJSON_AddObjectToObject(out, "guess");
-                if (!strchr(board, '_')) {
-                    cJSON_AddStringToObject(gs, "answer", board);
-                    cJSON_AddNumberToObject(gs, "confidence", 1);
-                } else {
-                    TfMove tg;
-                    pthread_mutex_lock(&model_lock);
-                    int grc = tf_guess(&model, seq, c2, b2, called, &tg);
-                    pthread_mutex_unlock(&model_lock);
-                    if (!grc) {
-                        cJSON_AddStringToObject(gs, "answer", tg.move + 6);
-                        cJSON_AddNumberToObject(gs, "confidence", py_round(tg.confidence, 4));
-                    }
-                }
-            }
+            int check_ok = !err;
             cJSON *mv = cJSON_CreateObject();
             if (!err) err = solve(mv, mode, c2, b2, k2, want);
+            const char *smart_solve = NULL;
             if (err) {
                 cJSON_Delete(mv);
+                mv = NULL;
                 cJSON_AddStringToObject(out, "moves_error", err);
             } else {
                 cJSON_AddItemToObject(out, "moves", mv);
+                cJSON *sm = cJSON_GetObjectItem(cJSON_GetObjectItem(mv, "smart"), "move");
+                if (cJSON_IsString(sm) && !strncmp(sm->valuestring, "SOLVE ", 6)) smart_solve = sm->valuestring + 6;
+            }
+            cJSON *gs = NULL;
+            if (!strchr(board, '_')) {
+                gs = cJSON_AddObjectToObject(out, "guess");
+                cJSON_AddStringToObject(gs, "answer", board);
+                cJSON_AddNumberToObject(gs, "confidence", 1);
+                cJSON_AddStringToObject(gs, "by", "board");
+            } else if (smart_solve) {
+                gs = cJSON_AddObjectToObject(out, "guess");
+                cJSON_AddStringToObject(gs, "answer", smart_solve);
+                cJSON_AddNumberToObject(gs, "confidence", 0.97);
+                cJSON_AddStringToObject(gs, "by", "smart-solve");
+            } else if (check_ok) {
+                TfMove tg;
+                pthread_mutex_lock(&model_lock);
+                int grc = tf_guess(&model, seq, c2, b2, called, &tg);
+                pthread_mutex_unlock(&model_lock);
+                if (!grc) {
+                    gs = cJSON_AddObjectToObject(out, "guess");
+                    cJSON_AddStringToObject(gs, "answer", tg.move + 6);
+                    cJSON_AddNumberToObject(gs, "confidence", py_round(tg.confidence, 4));
+                    cJSON_AddStringToObject(gs, "by", "transformer-solve");
+                }
             }
         }
     }
