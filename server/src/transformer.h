@@ -32,5 +32,9 @@ int tf_bonus_pick(const Model *m, Seq *s, const char *category, const char *boar
                   TfMove *out);
 int tf_bonus_solve(const Model *m, Seq *s, const char *category, const char *board, const char *called,
                    TfMove *out);
+// The model's best SOLVE for a MAIN board, however unsure: the MAIN prompt
+// with only a SOLVE allowed, and its confidence. For POST /decode, which
+// answers with a single guess rather than a move.
+int tf_guess(const Model *m, Seq *s, const char *category, const char *board, const char *called, TfMove *out);
 
 #endif

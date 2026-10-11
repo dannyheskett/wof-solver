@@ -43,7 +43,11 @@
 //   "called" is the letters showing: a screencap does not show misses. With
 //   solve=1 the reply also carries "moves": what /move answers for that board
 //   (mode main unless given; the bonus modes add R S T L N E to called), or
-//   "moves_error" when the board cannot be played. The board decoder is
+//   "moves_error" when the board cannot be played, and "guess":
+//   {"answer": ..., "confidence": 0.94}, transformer-solve's best SOLVE for
+//   the board however unsure (its MAIN prompt with only a SOLVE allowed):
+//   the single answer for snap and solve. A board with no hidden squares is
+//   its own answer, confidence 1. The board decoder is
 //   scripts/14_vision/decoder_net.py (server/src/decoder.c). /decode has its
 //   own limit, DECODE_RATE a minute per client, and reads one image at a time.
 //
@@ -777,6 +781,22 @@ static int do_decode(int fd, const Request *rq, const char *query, size_t qlen) 
             const char *err = strchr(board, '_') ? check(st, &mode, c2, b2, k2, want)
                                                  : "the board has no hidden squares";
             cJSON_Delete(st);
+            if (!err || strchr(board, '_') == NULL) {
+                cJSON *gs = cJSON_AddObjectToObject(out, "guess");
+                if (!strchr(board, '_')) {
+                    cJSON_AddStringToObject(gs, "answer", board);
+                    cJSON_AddNumberToObject(gs, "confidence", 1);
+                } else {
+                    TfMove tg;
+                    pthread_mutex_lock(&model_lock);
+                    int grc = tf_guess(&model, seq, c2, b2, called, &tg);
+                    pthread_mutex_unlock(&model_lock);
+                    if (!grc) {
+                        cJSON_AddStringToObject(gs, "answer", tg.move + 6);
+                        cJSON_AddNumberToObject(gs, "confidence", py_round(tg.confidence, 4));
+                    }
+                }
+            }
             cJSON *mv = cJSON_CreateObject();
             if (!err) err = solve(mv, mode, c2, b2, k2, want);
             if (err) {

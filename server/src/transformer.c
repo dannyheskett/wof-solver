@@ -186,6 +186,18 @@ int tf_bonus_pick(const Model *m, Seq *s, const char *category, const char *boar
     return 0;
 }
 
+int tf_guess(const Model *m, Seq *s, const char *category, const char *board, const char *called, TfMove *mv) {
+    memset(mv, 0, sizeof *mv);
+    char prompt[512], out[MAX_PAT + 1];
+    prompt_of(prompt, sizeof prompt, "MAIN", category, board, called, 1);
+    Grammar g = {.n = 0};
+    add_solve(&g, m, board, called);
+    if (decode(m, s, prompt, &g, out, lp_buf) < 0) return -1;
+    snprintf(mv->move, sizeof mv->move, "%s", out);
+    score(m, &g, 0, out, lp_buf, mv);
+    return 0;
+}
+
 int tf_bonus_solve(const Model *m, Seq *s, const char *category, const char *board, const char *called,
                    TfMove *mv) {
     memset(mv, 0, sizeof *mv);
