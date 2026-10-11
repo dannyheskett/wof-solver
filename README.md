@@ -29,7 +29,7 @@ query results are in the [v1 release](https://github.com/dannyheskett/wof-solver
 
 | Path | What it is |
 |---|---|
-| `scripts/` | the pipeline, one script per phase (`01_fetch_puzzles.py` to `13_build_demo.py`), the model and both solvers |
+| `scripts/` | the pipeline, one script per phase (`01_fetch_puzzles.py` to `13_build_demo.py`), the model and both solvers; `14_vision/` is the board decoder behind `POST /decode` |
 | `data/` | puzzles, category lists and results. [`DATA.md`](DATA.md) documents every file, [`data/SHA256SUMS`](data/SHA256SUMS) has their checksums |
 | `server/` | the C server that serves both solvers |
 | `client/` | the raylib game client, compiled to WebAssembly |

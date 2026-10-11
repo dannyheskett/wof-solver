@@ -4,3 +4,6 @@
 numpy==1.26.4
 pyarrow==25.0.1
 torch==2.14.0
+# Phase 14 (the board decoder) also needs Pillow, and its fetch script needs
+# ffmpeg, node and uv (it runs yt-dlp with uvx).
+pillow==12.3.0

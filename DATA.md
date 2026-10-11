@@ -73,6 +73,17 @@ All files are TSV with a header row, in `eval/`.
 | `summary.tsv` | 4 | One row per solver and mode: solve rate, wrong, invalid, letters, buys, misses, CPU time and memory. | 11 |
 | `tune.tsv` | 2,819 | Every early SOLVE transformer-solve wrote on the 300 dev puzzles. Columns `category`, `solution`, `letters_called`, `p` (its confidence), `right`, `answer`. Used to pick the 0.99 cutoff. | 10 `10_tune_solve.py` |
 
+## Board decoder (phase 14)
+
+| Path | Git | What | Phase |
+|---|---|---|---|
+| `vision/clips.tsv` | git | The 705 YouTube clips the real frames come from: `id`, `source` (`broadcast`, `offair` or `phone`), `channel`, `title`. 480 were fetched; the rest are broadcast clips not needed yet, two that YouTube refused and one age-restricted. | 14 |
+| `vision/raw/<id>/` | local | Each clip's `video.mp4` and one frame a second in `frames/`, 93,605 frames, 22 GB. The show's broadcast: never committed. | 14 `fetch_clips.sh` |
+| `vision/raw_lb/` | local | The same frames letterboxed to the decoder's 640 x 360 input, 5.7 GB, for a GPU pod | 14 `shrink_frames.py` |
+| `vision/real/labels2.jsonl`, `labels2_clean.jsonl` | local | Real frame labels: `clip`, `frame`, `source`, `answer`, `how` (`looked up` or `spelled`), `category`, `category_read`, `grid` (4 rows of 14 square classes), `review` (squares where the decoder disagreed) and `split` (`test` for control answers). The clean file drops doubtful spelled answers and keeps only looked-up answers in test. | 14 `label_real.py`, `clean_labels.py` |
+| `vision/synth/<split>/` | local | Synthetic frames, `<shard>/<k>.jpg` and `labels.jsonl`, rebuilt the same from seeds | 14 `make_frames.py` |
+| `vision/fonts/` | local | The six fonts frames are drawn with, copied from the system by `pod/pack.sh` so a pod renders the same frames | 14 |
+
 ## Local only (not in git)
 
 | Path | Size | What | Phase |
@@ -85,4 +96,4 @@ All files are TSV with a header row, in `eval/`.
 | `train/` | 1.5 GB | Token files for training: one byte per character (`alphabet.txt`, 48 characters), `<stream>.bin` with `<stream>.idx.npy` line offsets for `main`, `bonus`, `list`, `list_bonus`, `corpus` and their `_val` versions | 8 `08_make_train.py` |
 | `.cache/fetch/` | | Cached API responses, so a rerun of 1 resumes | 1 |
 
-Model checkpoints are in `runs/` (local). `runs/pre` is the pretrained transformer. `runs/ft2b` is the finetuned model behind both solvers' results, with `wof.bin`, its float16 export for the server (phase 12).
+Model checkpoints are in `runs/` (local). `runs/pre` is the pretrained transformer. `runs/ft2b` is the finetuned model behind both solvers' results, with `wof.bin`, its float16 export for the server (phase 12). `runs/vision/dec2` is the board decoder behind `/decode`, with `decoder.bin`, its export for the server.

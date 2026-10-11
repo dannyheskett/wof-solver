@@ -3,7 +3,7 @@
 #   fly deploy . --config server/fly.toml --dockerfile server/Dockerfile
 # The client is built beforehand (make -C client web) and copied in as is.
 FROM debian:bookworm-slim AS build
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev make \
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev make libwebp-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY server/Makefile server/
@@ -13,9 +13,12 @@ COPY client/third_party/cjson client/third_party/cjson
 RUN make -C server build/wof-server
 
 FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libwebp7 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /src/server/build/wof-server /usr/local/bin/wof-server
 COPY runs/ft2b/wof.bin models/wof.bin
+COPY runs/vision/dec2/decoder.bin models/decoder.bin
 COPY data/train.csv data/dev.csv data/demo.json data/
 COPY data/wordlist/american-english.txt data/wordlist/
 COPY client/build/web/ web/
