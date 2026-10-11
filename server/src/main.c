@@ -69,6 +69,7 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#include <malloc.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
@@ -719,8 +720,9 @@ static int do_decode(int fd, const Request *rq, const char *query, size_t qlen) 
         rc = decoder_forward(decoder, in, r);
     }
     double ms = 1000 * (now() - t0);
-    pthread_mutex_unlock(&decode_lock);
     free(in);
+    malloc_trim(0);   // hand back what the read freed
+    pthread_mutex_unlock(&decode_lock);
     if (!rgb || rc) {
         free(r);
         return rgb ? error_reply(fd, rq, 503, "out of memory")
@@ -1016,6 +1018,12 @@ static void split_origins(const char *list) {
 
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
+    // Large allocations (a /decode read's scratch, an uploaded image) come
+    // from mmap and go back to the kernel when freed. glibc would otherwise
+    // raise this threshold after the first one and keep later ones in the
+    // heap, and the memory it kept would push the transformer's weights out
+    // of the page cache on the 256 MB machine.
+    mallopt(M_MMAP_THRESHOLD, 128 * 1024);
     setvbuf(stdout, NULL, _IOLBF, 0);
     int port = (int)env_num("PORT", 8080);
     min_p = env_num("MIN_P", 0.99);

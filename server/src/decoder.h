@@ -1,8 +1,9 @@
 // The board decoder (scripts/14_vision/decoder_net.py) in plain C: load the
 // weights written by scripts/14_vision/export_decoder.py, read one image,
 // return the 52 squares, the category text and whether a board is there.
-// Single-threaded, float32 throughout. Weights are about 10 MB, read into
-// memory; a read allocates about 30 MB of scratch and frees it.
+// Single-threaded, float32 throughout. Weights are about 10 MB, mapped from
+// the file, so they are page cache the kernel can drop rather than memory
+// the process holds. A read allocates about 40 MB of scratch and frees it.
 #ifndef DECODER_H
 #define DECODER_H
 

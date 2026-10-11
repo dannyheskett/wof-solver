@@ -7,10 +7,14 @@
 // heads. GELU is the exact erf form, LayerNorm eps 1e-5, as in PyTorch.
 #include "decoder.h"
 
+#include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 const char DEC_CLASS_CHARS[DEC_CLASSES + 1] = "#_*ABCDEFGHIJKLMNOPQRSTUVWXYZ-&'.!?,~";
 static const char CAT_CHARS[DEC_CAT_CHARS + 1] = "\0 ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789&?!'.-/";
@@ -23,9 +27,9 @@ static const char CAT_CHARS[DEC_CAT_CHARS + 1] = "\0 ABCDEFGHIJKLMNOPQRSTUVWXYZ0
 #define STD 0.25f
 
 typedef struct {
-    const char *name;
+    char name[64];
     int ndim, dim[4];
-    float *v;
+    const float *v;   // into the mapped file
 } Tensor;
 
 typedef struct {
@@ -41,8 +45,7 @@ typedef struct {
 // A linear layer with its weight stored transposed, [in][out], so y = xW^T + b
 // accumulates along out (contiguous) and vectorises without reordering sums.
 typedef struct {
-    float *wt;
-    const float *b;
+    const float *wt, *b;
     int in, out;
 } Lin;
 
@@ -57,16 +60,15 @@ typedef struct {
 } DecLayer;
 
 struct Decoder {
+    void *map;          // the weights file, mapped read-only
+    size_t map_len;
     Tensor *t;
     int nt;
-    char *names;
     Conv stem, lat8, lat16, lat32;
     Block blocks[8];   // s1.0 s1.1 s2.0 s2.1 s3.0 s3.1 s4.0 s4.1
     const float *pos, *query, *qpos, *norm_w, *norm_b;
     DecLayer layer[LAYERS];
     Lin sq, cat, pr;
-    float *owned[64];   // transposed weights, freed with the decoder
-    int nowned;
 };
 
 // ------------------------------------------------------------------ load --
@@ -96,52 +98,67 @@ static Conv conv(const Decoder *d, const char *name, int cout, int cin, int k, i
     return c;
 }
 
-// A Lin from rows [row0, row0 + out) of a PyTorch weight [*][in] and its bias.
-static Lin lin(Decoder *d, const float *w, const float *b, int row0, int out, int in) {
-    Lin L = {NULL, b ? b + row0 : NULL, in, out};
-    if (!w || d->nowned >= 64) return L;
-    L.wt = malloc((size_t)in * out * sizeof(float));
-    for (int o = 0; o < out; o++)
-        for (int i = 0; i < in; i++) L.wt[(size_t)i * out + o] = w[(size_t)(row0 + o) * in + i];
-    d->owned[d->nowned++] = L.wt;
+// The linear layer stored as <name>.wt [in][out] and <name>.b [out].
+static Lin lin(const Decoder *d, const char *name, int in, int out, int *ok) {
+    char w[64], b[64];
+    snprintf(w, sizeof w, "%s.wt", name);
+    snprintf(b, sizeof b, "%s.b", name);
+    Lin L = {get(d, w, in, out, 0, 0, ok), get(d, b, out, 0, 0, 0, ok), in, out};
     return L;
 }
 
+static Decoder *load_fail(Decoder *d, char *err, size_t errlen, const char *path, const char *msg) {
+    snprintf(err, errlen, "%s: %s", path, msg);
+    decoder_free(d);
+    return NULL;
+}
+
 Decoder *decoder_load(const char *path, char *err, size_t errlen) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        snprintf(err, errlen, "%s: cannot open", path);
-        return NULL;
-    }
     Decoder *d = calloc(1, sizeof *d);
-    char magic[4];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return load_fail(d, err, errlen, path, "cannot open");
+    struct stat st;
+    if (fstat(fd, &st) || st.st_size < 12) {
+        close(fd);
+        return load_fail(d, err, errlen, path, "not a version 2 WOFD decoder file");
+    }
+    // Map the file rather than copy it: its pages are page cache the kernel
+    // can drop between reads, instead of memory the process holds.
+    void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) return load_fail(d, err, errlen, path, "cannot map");
+    d->map = map, d->map_len = (size_t)st.st_size;
+    const unsigned char *b = map;
     uint32_t hdr[2];
-    int ok = fread(magic, 4, 1, f) == 1 && fread(hdr, 4, 2, f) == 2 && !memcmp(magic, "WOFD", 4)
-             && hdr[0] == 1 && hdr[1] < 1000;
-    if (ok) {
-        d->nt = (int)hdr[1];
-        d->t = calloc((size_t)d->nt, sizeof *d->t);
-        d->names = calloc((size_t)d->nt, 64);
-    }
-    for (int i = 0; ok && i < d->nt; i++) {
+    memcpy(hdr, b + 4, sizeof hdr);
+    if (memcmp(b, "WOFD", 4) || hdr[0] != 2 || hdr[1] > 1000)
+        return load_fail(d, err, errlen, path, "not a version 2 WOFD decoder file");
+    d->nt = (int)hdr[1];
+    d->t = calloc((size_t)d->nt, sizeof *d->t);
+    size_t off = 12;
+    for (int i = 0; i < d->nt; i++) {
         Tensor *t = &d->t[i];
-        uint32_t len, nd, dims[4] = {0};
-        ok = fread(&len, 4, 1, f) == 1 && len < 64 && fread(d->names + 64 * i, 1, len, f) == len
-             && fread(&nd, 4, 1, f) == 1 && nd >= 1 && nd <= 4 && fread(dims, 4, nd, f) == nd;
-        if (!ok) break;
-        t->name = d->names + 64 * i;
-        t->ndim = (int)nd;
+        uint32_t len, nd;
+        if (off + 4 > d->map_len) goto bad;
+        memcpy(&len, b + off, 4), off += 4;
+        if (len >= sizeof t->name || off + len + 4 > d->map_len) goto bad;
+        memcpy(t->name, b + off, len), off += len;
+        memcpy(&nd, b + off, 4), off += 4;
+        if (nd < 1 || nd > 4 || off + 4 * nd > d->map_len) goto bad;
         size_t n = 1;
-        for (uint32_t k = 0; k < nd; k++) t->dim[k] = (int)dims[k], n *= dims[k];
-        t->v = malloc(n * sizeof(float));
-        ok = t->v && fread(t->v, sizeof(float), n, f) == n;
+        for (uint32_t k = 0; k < nd; k++) {
+            uint32_t v;
+            memcpy(&v, b + off, 4), off += 4;
+            t->dim[k] = (int)v, n *= v;
+        }
+        t->ndim = (int)nd;
+        off = (off + 15) & ~(size_t)15;
+        if (off + n * sizeof(float) > d->map_len) goto bad;
+        t->v = (const float *)(b + off);
+        off += n * sizeof(float);
     }
-    fclose(f);
-    if (!ok) {
-        snprintf(err, errlen, "%s: not a version 1 WOFD decoder file", path);
-        decoder_free(d);
-        return NULL;
-    }
+    if (off != d->map_len) goto bad;
+    int ok = 1;
     static const int widths[5] = {32, 48, 64, 96, 128};
     d->stem = conv(d, "stem", widths[0], 3, 3, &ok);
     for (int s = 0; s < 4; s++)
@@ -169,64 +186,40 @@ Decoder *decoder_load(const char *path, char *err, size_t errlen) {
     for (int l = 0; l < LAYERS; l++) {
         DecLayer *L = &d->layer[l];
         char n[48];
-#define G(field, suffix, a, b)                              \
+#define G(field, suffix)                                    \
     snprintf(n, sizeof n, "layer%d.%s", l, suffix);         \
-    L->field = get(d, n, a, b, 0, 0, &ok);
-        G(n1w, "n1.w", D_MODEL, 0) G(n1b, "n1.b", D_MODEL, 0)
-        G(n2w, "n2.w", D_MODEL, 0) G(n2b, "n2.b", D_MODEL, 0)
-        G(n3w, "n3.w", D_MODEL, 0) G(n3b, "n3.b", D_MODEL, 0)
+    L->field = get(d, n, D_MODEL, 0, 0, 0, &ok);
+        G(n1w, "n1.w") G(n1b, "n1.b") G(n2w, "n2.w") G(n2b, "n2.b") G(n3w, "n3.w") G(n3b, "n3.b")
 #undef G
         const char *an[2] = {"self_attn", "cross"};
         Attn *at[2] = {&L->self, &L->cross};
         for (int a = 0; a < 2; a++) {
-            const float *iw, *ib, *ow, *ob;
-            snprintf(n, sizeof n, "layer%d.%s.in_w", l, an[a]);
-            iw = get(d, n, 3 * D_MODEL, D_MODEL, 0, 0, &ok);
-            snprintf(n, sizeof n, "layer%d.%s.in_b", l, an[a]);
-            ib = get(d, n, 3 * D_MODEL, 0, 0, 0, &ok);
-            snprintf(n, sizeof n, "layer%d.%s.out_w", l, an[a]);
-            ow = get(d, n, D_MODEL, D_MODEL, 0, 0, &ok);
-            snprintf(n, sizeof n, "layer%d.%s.out_b", l, an[a]);
-            ob = get(d, n, D_MODEL, 0, 0, 0, &ok);
-            at[a]->q = lin(d, iw, ib, 0, D_MODEL, D_MODEL);
-            at[a]->k = lin(d, iw, ib, D_MODEL, D_MODEL, D_MODEL);
-            at[a]->v = lin(d, iw, ib, 2 * D_MODEL, D_MODEL, D_MODEL);
-            at[a]->o = lin(d, ow, ob, 0, D_MODEL, D_MODEL);
+            Lin *parts[4] = {&at[a]->q, &at[a]->k, &at[a]->v, &at[a]->o};
+            for (int k = 0; k < 4; k++) {
+                snprintf(n, sizeof n, "layer%d.%s.%c", l, an[a], "qkvo"[k]);
+                *parts[k] = lin(d, n, D_MODEL, D_MODEL, &ok);
+            }
         }
-        const float *w, *b;
-        snprintf(n, sizeof n, "layer%d.fc.w", l);
-        w = get(d, n, 4 * D_MODEL, D_MODEL, 0, 0, &ok);
-        snprintf(n, sizeof n, "layer%d.fc.b", l);
-        b = get(d, n, 4 * D_MODEL, 0, 0, 0, &ok);
-        L->fc = lin(d, w, b, 0, 4 * D_MODEL, D_MODEL);
-        snprintf(n, sizeof n, "layer%d.proj.w", l);
-        w = get(d, n, D_MODEL, 4 * D_MODEL, 0, 0, &ok);
-        snprintf(n, sizeof n, "layer%d.proj.b", l);
-        b = get(d, n, D_MODEL, 0, 0, 0, &ok);
-        L->proj = lin(d, w, b, 0, D_MODEL, 4 * D_MODEL);
+        snprintf(n, sizeof n, "layer%d.fc", l);
+        L->fc = lin(d, n, D_MODEL, 4 * D_MODEL, &ok);
+        snprintf(n, sizeof n, "layer%d.proj", l);
+        L->proj = lin(d, n, 4 * D_MODEL, D_MODEL, &ok);
     }
     d->norm_w = get(d, "norm.w", D_MODEL, 0, 0, 0, &ok);
     d->norm_b = get(d, "norm.b", D_MODEL, 0, 0, 0, &ok);
-    const float *hw = get(d, "sq_head.w", DEC_CLASSES, D_MODEL, 0, 0, &ok);
-    d->sq = lin(d, hw, get(d, "sq_head.b", DEC_CLASSES, 0, 0, 0, &ok), 0, DEC_CLASSES, D_MODEL);
-    hw = get(d, "cat_head.w", DEC_CAT_CHARS, D_MODEL, 0, 0, &ok);
-    d->cat = lin(d, hw, get(d, "cat_head.b", DEC_CAT_CHARS, 0, 0, 0, &ok), 0, DEC_CAT_CHARS, D_MODEL);
-    hw = get(d, "present_head.w", 1, D_MODEL, 0, 0, &ok);
-    d->pr = lin(d, hw, get(d, "present_head.b", 1, 0, 0, 0, &ok), 0, 1, D_MODEL);
-    if (!ok || d->nowned >= 64) {
-        snprintf(err, errlen, "%s: a tensor is missing or the wrong shape", path);
-        decoder_free(d);
-        return NULL;
-    }
+    d->sq = lin(d, "sq_head", D_MODEL, DEC_CLASSES, &ok);
+    d->cat = lin(d, "cat_head", D_MODEL, DEC_CAT_CHARS, &ok);
+    d->pr = lin(d, "present_head", D_MODEL, 1, &ok);
+    if (!ok) return load_fail(d, err, errlen, path, "a tensor is missing or the wrong shape");
     return d;
+bad:
+    return load_fail(d, err, errlen, path, "not a version 2 WOFD decoder file");
 }
 
 void decoder_free(Decoder *d) {
     if (!d) return;
-    for (int i = 0; i < d->nt; i++) free(d->t[i].v);
-    for (int i = 0; i < d->nowned; i++) free(d->owned[i]);
+    if (d->map) munmap(d->map, d->map_len);
     free(d->t);
-    free(d->names);
     free(d);
 }
 
