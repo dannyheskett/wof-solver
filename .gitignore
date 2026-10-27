@@ -15,3 +15,6 @@ __pycache__/
 /data/vision/fonts/
 /data/vision/raw_lb/
 /data/vision/real/
+
+# Local agent state
+/.claude/
